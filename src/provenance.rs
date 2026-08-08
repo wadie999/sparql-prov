@@ -1,7 +1,7 @@
 //! Provenance expressions produced by NPCS rewriting.
 //!
 //! The expression model represents the classical NPCS operators
-//! independently of their SPARQL string encoding.
+//! independently of the SPARQL expressions used to construct them.
 
 use std::fmt;
 
@@ -52,9 +52,47 @@ pub enum ProvenanceExpr {
     },
 }
 
+impl fmt::Display for ProvenanceExpr {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => formatter.write_str("0"),
+            Self::One => formatter.write_str("1"),
+            Self::Source(source) => source.fmt(formatter),
+
+            Self::Sum(terms) => {
+                formatter.write_str("(⊕")?;
+
+                for term in terms {
+                    write!(formatter, " {term}")?;
+                }
+
+                formatter.write_str(")")
+            }
+
+            Self::Product(factors) => {
+                formatter.write_str("(⊗")?;
+
+                for factor in factors {
+                    write!(formatter, " {factor}")?;
+                }
+
+                formatter.write_str(")")
+            }
+
+            Self::Difference { left, right } => {
+                write!(formatter, "(⊖ {left} {right})")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(identifier: &str) -> ProvenanceExpr {
+        ProvenanceExpr::Source(SourceId::new(identifier))
+    }
 
     #[test]
     fn source_identifier_preserves_value() {
@@ -65,34 +103,59 @@ mod tests {
     }
 
     #[test]
-    fn represents_npcs_running_example() {
-        let expression = ProvenanceExpr::Product(vec![
-            ProvenanceExpr::Sum(vec![
-                ProvenanceExpr::Source(SourceId::new("u1")),
-                ProvenanceExpr::Source(SourceId::new("u2")),
-            ]),
-            ProvenanceExpr::Source(SourceId::new("u3")),
-        ]);
-
-        assert_eq!(
-            expression,
-            ProvenanceExpr::Product(vec![
-                ProvenanceExpr::Sum(vec![
-                    ProvenanceExpr::Source(SourceId::new("u1")),
-                    ProvenanceExpr::Source(SourceId::new("u2")),
-                ]),
-                ProvenanceExpr::Source(SourceId::new("u3")),
-            ])
-        );
+    fn renders_identities_and_source() {
+        assert_eq!(ProvenanceExpr::Zero.to_string(), "0");
+        assert_eq!(ProvenanceExpr::One.to_string(), "1");
+        assert_eq!(source("u1").to_string(), "u1");
     }
 
     #[test]
-    fn represents_difference() {
+    fn renders_sum() {
+        let expression = ProvenanceExpr::Sum(vec![source("u1"), source("u2")]);
+
+        assert_eq!(expression.to_string(), "(⊕ u1 u2)");
+    }
+
+    #[test]
+    fn renders_product() {
+        let expression = ProvenanceExpr::Product(vec![source("u1"), source("u2")]);
+
+        assert_eq!(expression.to_string(), "(⊗ u1 u2)");
+    }
+
+    #[test]
+    fn renders_difference() {
         let expression = ProvenanceExpr::Difference {
-            left: Box::new(ProvenanceExpr::Source(SourceId::new("u1"))),
-            right: Box::new(ProvenanceExpr::Source(SourceId::new("u2"))),
+            left: Box::new(source("u1")),
+            right: Box::new(source("u2")),
         };
 
-        assert!(matches!(expression, ProvenanceExpr::Difference { .. }));
+        assert_eq!(expression.to_string(), "(⊖ u1 u2)");
+    }
+
+    #[test]
+    fn renders_npcs_running_example() {
+        let expression = ProvenanceExpr::Product(vec![
+            ProvenanceExpr::Sum(vec![source("u1"), source("u2")]),
+            source("u3"),
+        ]);
+
+        assert_eq!(expression.to_string(), "(⊗ (⊕ u1 u2) u3)");
+    }
+
+    #[test]
+    fn preserves_nested_expression_structure() {
+        let expression = ProvenanceExpr::Sum(vec![
+            source("u1"),
+            ProvenanceExpr::Product(vec![source("u2"), source("u3")]),
+        ]);
+
+        assert_eq!(expression.to_string(), "(⊕ u1 (⊗ u2 u3))");
+    }
+
+    #[test]
+    fn renders_empty_sum_and_product_structurally() {
+        assert_eq!(ProvenanceExpr::Sum(vec![]).to_string(), "(⊕)");
+        assert_eq!(ProvenanceExpr::Product(vec![]).to_string(), "(⊗)");
     }
 }
