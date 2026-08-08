@@ -5,6 +5,7 @@
 
 mod aggregate;
 mod and;
+mod diff;
 mod fallback;
 mod sum_query;
 mod union;
@@ -41,6 +42,10 @@ pub(super) fn rewrite_with_context(
 
     if union::is_applicable(query) {
         return union::rewrite(query, provenance, context);
+    }
+
+    if diff::is_applicable(query) {
+        return diff::rewrite(query, provenance, context);
     }
 
     fallback::rewrite(query, provenance, context)
