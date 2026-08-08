@@ -3,4 +3,5 @@
 pub mod base;
 
 mod context;
+mod scope;
 mod variables;
