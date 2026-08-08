@@ -6,3 +6,4 @@
 pub mod model;
 pub mod plan;
 pub mod provenance;
+pub mod rewrite;

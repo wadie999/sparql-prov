@@ -44,6 +44,7 @@ impl InternalVarAllocator {
     /// Returns a fresh internal variable.
     pub fn fresh(&mut self) -> InternalVar {
         let variable = InternalVar::new(self.next);
+
         self.next = self
             .next
             .checked_add(1)
@@ -102,13 +103,17 @@ pub enum SelectItem {
     },
 }
 
-/// Renaming used by the compatibility-preserving OPTIONAL construction.
+/// One entry of the variable substitution `ν` used by NPCS DIFF.
 ///
-/// NPCS uses fresh variables for shared variables that are not strongly
-/// bound on the left side of DIFF.
+/// The substitution maps an original query variable to a fresh internal
+/// variable. The target is expected to be allocated by the rewrite context
+/// and therefore must not collide with variables from the input query.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VariableSubstitution {
+    /// Variable occurring in the original query.
     pub from: Variable,
+
+    /// Fresh variable replacing it in the renamed right operand.
     pub to: PlanVar,
 }
 
@@ -133,7 +138,27 @@ pub enum RewritePlan {
     /// Union several plan inputs.
     Union(Vec<RewritePlan>),
 
-    /// OPTIONAL with the variable-renaming information required by DIFF.
+    /// Compatibility-preserving OPTIONAL used by NPCS Rule 5.
+    ///
+    /// This node represents the construction
+    ///
+    /// `((left OPTIONAL ν(right)) FILTER Cν)`.
+    ///
+    /// `substitutions` represents the variable substitution `ν`. Each
+    /// substitution must be applied to the entire right operand before it
+    /// is evaluated. This includes variable occurrences in triple patterns,
+    /// projections, grouping keys, BIND targets, and expressions referenced
+    /// by preserved FILTER or BIND expression identifiers.
+    ///
+    /// Lowering this node must also generate the compatibility condition
+    /// `Cν`. For every substitution `y -> ν(y)`, the corresponding condition
+    /// is logically:
+    ///
+    /// `!BOUND(y) || !BOUND(ν(y)) || y = ν(y)`.
+    ///
+    /// This is not an ordinary OPTIONAL. The renaming and compatibility
+    /// condition prevent bindings introduced only by the right operand from
+    /// leaking into the solution represented by the left operand.
     CompatibleOptional {
         left: Box<RewritePlan>,
         right: Box<RewritePlan>,
@@ -168,10 +193,10 @@ pub enum RewritePlan {
     },
 }
 
-/// Result of rewriting one query subtree.
+/// Result of rewriting a query.
 ///
 /// Besides the plan itself, callers need to know which internal variable
-/// contains that subtree's provenance annotation.
+/// contains the query's provenance annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RewriteFragment {
     pub plan: RewritePlan,
@@ -214,6 +239,7 @@ mod tests {
         let mut second_allocator = InternalVarAllocator::new();
 
         assert_eq!(first_allocator.fresh(), InternalVar::new(0));
+
         assert_eq!(second_allocator.fresh(), InternalVar::new(0));
     }
 
@@ -244,6 +270,7 @@ mod tests {
     #[test]
     fn represents_provenance_product() {
         let left = PlanVar::Internal(InternalVar::new(1));
+
         let right = PlanVar::Internal(InternalVar::new(2));
 
         let expression = PlanExpr::Product(vec![
@@ -253,13 +280,14 @@ mod tests {
 
         assert_eq!(
             expression,
-            PlanExpr::Product(vec![PlanExpr::Var(left), PlanExpr::Var(right)])
+            PlanExpr::Product(vec![PlanExpr::Var(left), PlanExpr::Var(right),])
         );
     }
 
     #[test]
     fn represents_nested_provenance_computation() {
         let left = PlanVar::Internal(InternalVar::new(1));
+
         let right = PlanVar::Internal(InternalVar::new(2));
 
         let expression = PlanExpr::Difference {
