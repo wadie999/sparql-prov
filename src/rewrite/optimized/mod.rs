@@ -7,6 +7,7 @@ mod aggregate;
 mod and;
 mod fallback;
 mod sum_query;
+mod union;
 
 use crate::model::CoreQuery;
 use crate::plan::{PlanVar, RewriteFragment, RewritePlan};
@@ -36,6 +37,10 @@ pub(super) fn rewrite_with_context(
 ) -> RewritePlan {
     if and::is_applicable(query) {
         return and::rewrite(query, provenance, context);
+    }
+
+    if union::is_applicable(query) {
+        return union::rewrite(query, provenance, context);
     }
 
     fallback::rewrite(query, provenance, context)
@@ -94,7 +99,7 @@ mod tests {
         assert!(
             inputs
                 .iter()
-                .all(|input| matches!(input, RewritePlan::ReifiedTriple { .. }))
+                .all(|input| { matches!(input, RewritePlan::ReifiedTriple { .. }) })
         );
     }
 }

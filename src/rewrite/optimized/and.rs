@@ -1,8 +1,7 @@
 use crate::model::CoreQuery;
 use crate::plan::{PlanExpr, PlanVar, RewritePlan};
 
-use super::aggregate;
-use super::sum_query::{self, SumPattern};
+use super::{aggregate, sum_query};
 use crate::rewrite::context::RewriteContext;
 use crate::rewrite::scope::in_scope;
 
@@ -30,45 +29,46 @@ pub(super) fn rewrite(
 ) -> RewritePlan {
     let variables = in_scope(query);
 
-    let pattern = pattern(query, context);
+    let sum_input = context.fresh_var();
 
-    aggregate::sum_by(pattern.pattern, &variables, &pattern.provenance, provenance)
+    let pattern = pattern(query, &sum_input, context);
+
+    aggregate::sum_by(pattern, &variables, &sum_input, provenance)
 }
 
-/// Builds the optimized pattern `T` for Rule 1 without its outer sum.
-pub(super) fn pattern(query: &CoreQuery, context: &mut RewriteContext) -> SumPattern {
+/// Builds the optimized pattern `T` for Rule 1.
+///
+/// Each operand pattern exposes its provenance through a distinct fresh
+/// variable. Those provenance values are multiplied into `provenance`.
+pub(super) fn pattern(
+    query: &CoreQuery,
+    provenance: &PlanVar,
+    context: &mut RewriteContext,
+) -> RewritePlan {
     debug_assert!(is_applicable(query));
 
     let mut operands = Vec::new();
 
     collect_operands(query, &mut operands);
 
-    let patterns: Vec<_> = operands
-        .into_iter()
-        .map(|operand| sum_query::pattern(operand, context))
-        .collect();
+    let mut patterns = Vec::with_capacity(operands.len());
 
-    let provenance_inputs: Vec<_> = patterns
-        .iter()
-        .map(|pattern| PlanExpr::Var(pattern.provenance.clone()))
-        .collect();
+    let mut provenance_inputs = Vec::with_capacity(operands.len());
 
-    let inputs: Vec<_> = patterns
-        .into_iter()
-        .map(|pattern| pattern.pattern)
-        .collect();
+    for operand in operands {
+        let operand_provenance = context.fresh_var();
 
-    let product = context.fresh_var();
+        let operand_pattern = sum_query::pattern(operand, &operand_provenance, context);
 
-    let pattern = RewritePlan::Extend {
-        input: Box::new(RewritePlan::Join(inputs)),
+        patterns.push(operand_pattern);
+
+        provenance_inputs.push(PlanExpr::Var(operand_provenance));
+    }
+
+    RewritePlan::Extend {
+        input: Box::new(RewritePlan::Join(patterns)),
         expression: PlanExpr::Product(provenance_inputs),
-        variable: product.clone(),
-    };
-
-    SumPattern {
-        pattern,
-        provenance: product,
+        variable: provenance.clone(),
     }
 }
 
@@ -114,11 +114,11 @@ mod tests {
 
         let fragment = super::super::rewrite(&query);
 
+        let sum_input = PlanVar::Internal(InternalVar::new(1));
+
         let left_source = PlanVar::Internal(InternalVar::new(2));
 
-        let right_source = PlanVar::Internal(InternalVar::new(4));
-
-        let product = PlanVar::Internal(InternalVar::new(5));
+        let right_source = PlanVar::Internal(InternalVar::new(3));
 
         assert_eq!(
             fragment.plan,
@@ -139,15 +139,15 @@ mod tests {
                             },
                             source: right_source.clone(),
                         },
-                    ]),),
+                    ],),),
                     expression: PlanExpr::Product(vec![
                         PlanExpr::Var(left_source,),
                         PlanExpr::Var(right_source,),
-                    ]),
-                    variable: product.clone(),
+                    ],),
+                    variable: sum_input.clone(),
                 },),
                 items: vec![SelectItem::Expr {
-                    expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(product,),),),
+                    expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(sum_input,),),),
                     alias: fragment.provenance.clone(),
                 },],
                 group_by: vec![],
