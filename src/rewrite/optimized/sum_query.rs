@@ -1,7 +1,7 @@
 use crate::model::CoreQuery;
 use crate::plan::{PlanExpr, PlanVar, RewritePlan};
 
-use super::{and, union};
+use super::{and, select, union};
 use crate::rewrite::context::RewriteContext;
 
 /// Returns whether a query is a sum-query according to Definition 4.5.
@@ -39,6 +39,10 @@ pub(super) fn pattern(
 
     if union::is_applicable(query) {
         return union::pattern(query, provenance, context);
+    }
+
+    if select::is_applicable(query) {
+        return select::pattern(query, provenance, context);
     }
 
     base_pattern(query, provenance, context)
