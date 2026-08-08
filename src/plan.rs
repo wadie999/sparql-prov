@@ -26,6 +26,33 @@ impl InternalVar {
     }
 }
 
+/// Allocates fresh internal variables for a rewriting operation.
+///
+/// The allocator deals only with logical identities. Concrete SPARQL
+/// variable names are assigned later by the compiler.
+#[derive(Debug, Default)]
+pub struct InternalVarAllocator {
+    next: u32,
+}
+
+impl InternalVarAllocator {
+    /// Creates an allocator starting from the first internal identity.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a fresh internal variable.
+    pub fn fresh(&mut self) -> InternalVar {
+        let variable = InternalVar::new(self.next);
+        self.next = self
+            .next
+            .checked_add(1)
+            .expect("internal variable identifier space exhausted");
+
+        variable
+    }
+}
+
 /// A variable referenced by a rewrite plan.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PlanVar {
@@ -182,6 +209,32 @@ mod tests {
 
         assert_eq!(first.index(), 1);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn allocator_returns_distinct_variables_in_order() {
+        let mut allocator = InternalVarAllocator::new();
+
+        let first = allocator.fresh();
+        let second = allocator.fresh();
+        let third = allocator.fresh();
+
+        assert_eq!(first.index(), 0);
+        assert_eq!(second.index(), 1);
+        assert_eq!(third.index(), 2);
+
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
+    }
+
+    #[test]
+    fn independent_allocators_have_independent_identity_spaces() {
+        let mut first_allocator = InternalVarAllocator::new();
+        let mut second_allocator = InternalVarAllocator::new();
+
+        assert_eq!(first_allocator.fresh(), InternalVar::new(0));
+        assert_eq!(second_allocator.fresh(), InternalVar::new(0));
     }
 
     #[test]
