@@ -4,7 +4,7 @@
 //! depending on a SPARQL parser, serializer, endpoint, or concrete
 //! generated variable names.
 
-use crate::model::TriplePattern;
+use crate::model::{QueryExprId, TriplePattern};
 use oxrdf::Variable;
 
 /// Identity of an internal variable introduced by rewriting.
@@ -61,26 +61,6 @@ pub enum PlanVar {
 
     /// Fresh variable introduced by rewriting.
     Internal(InternalVar),
-}
-
-/// Opaque reference to an expression originating from the input query.
-///
-/// FILTER and BIND expressions are not interpreted by the NPCS rewriting
-/// rules. They are retained by reference and emitted unchanged by the
-/// eventual SPARQL compiler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct QueryExprId(u32);
-
-impl QueryExprId {
-    /// Creates an expression reference.
-    pub fn new(index: u32) -> Self {
-        Self(index)
-    }
-
-    /// Returns the numeric identity of the referenced expression.
-    pub fn index(self) -> u32 {
-        self.0
-    }
 }
 
 /// Provenance computation introduced by the rewriting engine.
@@ -238,13 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn query_expression_ids_are_opaque_stable_references() {
-        let expression = QueryExprId::new(7);
-
-        assert_eq!(expression.index(), 7);
-    }
-
-    #[test]
     fn represents_empty_pattern_rewrite() {
         let provenance = PlanVar::Internal(InternalVar::new(0));
 
@@ -295,5 +268,23 @@ mod tests {
         };
 
         assert!(matches!(expression, PlanExpr::Difference { .. }));
+    }
+
+    #[test]
+    fn plan_reuses_input_query_expression_identity() {
+        let condition = QueryExprId::new(9);
+
+        let plan = RewritePlan::Filter {
+            input: Box::new(RewritePlan::Unit),
+            condition,
+        };
+
+        assert!(matches!(
+            plan,
+            RewritePlan::Filter {
+                condition: plan_condition,
+                ..
+            } if plan_condition == condition
+        ));
     }
 }
