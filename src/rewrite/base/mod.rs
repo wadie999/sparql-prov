@@ -6,6 +6,7 @@ mod aggregate;
 mod and;
 mod diff;
 mod empty;
+mod select;
 mod triple;
 mod union;
 
@@ -48,6 +49,8 @@ pub(super) fn rewrite_with_context(
 
             diff::rewrite(left, right, &variables, context)
         }
+
+        CoreQuery::Select { variables, input } => select::rewrite(variables, input, context),
 
         _ => todo!("remaining NPCS base rewriting rules"),
     }
