@@ -1,5 +1,5 @@
 use crate::model::CoreQuery;
-use crate::plan::RewriteFragment;
+use crate::plan::{PlanVar, RewritePlan};
 use oxrdf::Variable;
 
 use super::{aggregate, rewrite_with_context};
@@ -12,22 +12,21 @@ use crate::rewrite::context::RewriteContext;
 pub(super) fn rewrite(
     variables: &[Variable],
     input: &CoreQuery,
+    provenance: &PlanVar,
     context: &mut RewriteContext,
-) -> RewriteFragment {
-    let input = rewrite_with_context(input, context);
-    let provenance = context.fresh_var();
+) -> RewritePlan {
+    let input_provenance = context.fresh_var();
 
-    RewriteFragment {
-        plan: aggregate::sum_by(input.plan, variables, &input.provenance, &provenance),
-        provenance,
-    }
+    let input = rewrite_with_context(input, &input_provenance, context);
+
+    aggregate::sum_by(input, variables, &input_provenance, provenance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern};
-    use crate::plan::{InternalVar, PlanExpr, PlanVar, RewritePlan, SelectItem};
+    use crate::plan::{InternalVar, PlanExpr, SelectItem};
     use oxrdf::{NamedNode, Variable};
 
     #[test]
@@ -47,20 +46,18 @@ mod tests {
         let variables = vec![x.clone()];
 
         let mut context = RewriteContext::new();
+        let provenance = context.fresh_var();
 
-        let fragment = rewrite(&variables, &input, &mut context);
+        let plan = rewrite(&variables, &input, &provenance, &mut context);
 
-        let source = PlanVar::Internal(InternalVar::new(0));
         let input_provenance = PlanVar::Internal(InternalVar::new(1));
-        let provenance = PlanVar::Internal(InternalVar::new(2));
+        let source = PlanVar::Internal(InternalVar::new(2));
 
         let x = PlanVar::User(x);
         let y = PlanVar::User(y);
 
-        assert_eq!(fragment.provenance, provenance);
-
         assert_eq!(
-            fragment.plan,
+            plan,
             RewritePlan::Select {
                 input: Box::new(RewritePlan::Select {
                     input: Box::new(RewritePlan::ReifiedTriple {
@@ -68,21 +65,21 @@ mod tests {
                         source: source.clone(),
                     },),
                     items: vec![
-                        SelectItem::Var(x.clone()),
-                        SelectItem::Var(y.clone()),
+                        SelectItem::Var(x.clone(),),
+                        SelectItem::Var(y.clone(),),
                         SelectItem::Expr {
-                            expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(source),),),
+                            expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(source,),),),
                             alias: input_provenance.clone(),
                         },
                     ],
                     group_by: vec![x.clone(), y,],
-                }),
+                },),
                 items: vec![
                     SelectItem::Var(x.clone()),
                     SelectItem::Expr {
                         expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(
                             input_provenance,
-                        )),),
+                        ),),),
                         alias: provenance,
                     },
                 ],

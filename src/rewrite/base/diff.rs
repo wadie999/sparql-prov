@@ -1,7 +1,5 @@
 use crate::model::CoreQuery;
-use crate::plan::{
-    PlanExpr, PlanVar, RewriteFragment, RewritePlan, SelectItem, VariableSubstitution,
-};
+use crate::plan::{PlanExpr, PlanVar, RewritePlan, SelectItem, VariableSubstitution};
 use oxrdf::Variable;
 
 use super::rewrite_with_context;
@@ -16,8 +14,9 @@ pub(super) fn rewrite(
     left: &CoreQuery,
     right: &CoreQuery,
     variables: &[Variable],
+    provenance: &PlanVar,
     context: &mut RewriteContext,
-) -> RewriteFragment {
+) -> RewritePlan {
     let substitutions = diff_substitution_variables(left, right)
         .into_iter()
         .map(|from| VariableSubstitution {
@@ -26,20 +25,23 @@ pub(super) fn rewrite(
         })
         .collect();
 
-    let left = rewrite_with_context(left, context);
-    let right = rewrite_with_context(right, context);
+    let left_provenance = context.fresh_var();
 
-    let provenance = context.fresh_var();
+    let left = rewrite_with_context(left, &left_provenance, context);
+
+    let right_provenance = context.fresh_var();
+
+    let right = rewrite_with_context(right, &right_provenance, context);
 
     let optional = RewritePlan::CompatibleOptional {
-        left: Box::new(left.plan),
-        right: Box::new(right.plan),
+        left: Box::new(left),
+        right: Box::new(right),
         substitutions,
     };
 
     let mut group_by: Vec<_> = variables.iter().cloned().map(PlanVar::User).collect();
 
-    group_by.push(left.provenance.clone());
+    group_by.push(left_provenance.clone());
 
     let mut items: Vec<_> = variables
         .iter()
@@ -50,21 +52,18 @@ pub(super) fn rewrite(
 
     items.push(SelectItem::Expr {
         expression: PlanExpr::Difference {
-            left: Box::new(PlanExpr::Var(left.provenance.clone())),
+            left: Box::new(PlanExpr::Var(left_provenance.clone())),
             right: Box::new(PlanExpr::AggregateSum(Box::new(PlanExpr::Var(
-                right.provenance,
+                right_provenance,
             )))),
         },
         alias: provenance.clone(),
     });
 
-    RewriteFragment {
-        plan: RewritePlan::Select {
-            input: Box::new(optional),
-            items,
-            group_by,
-        },
-        provenance,
+    RewritePlan::Select {
+        input: Box::new(optional),
+        items,
+        group_by,
     }
 }
 
@@ -92,37 +91,36 @@ mod tests {
         let right = CoreQuery::Empty;
 
         let mut context = RewriteContext::new();
+        let provenance = context.fresh_var();
 
-        let fragment = rewrite(&left, &right, &[], &mut context);
+        let plan = rewrite(&left, &right, &[], &provenance, &mut context);
 
-        let left_provenance = PlanVar::Internal(InternalVar::new(0));
-        let right_provenance = PlanVar::Internal(InternalVar::new(1));
-        let provenance = PlanVar::Internal(InternalVar::new(2));
+        let left_provenance = PlanVar::Internal(InternalVar::new(1));
 
-        assert_eq!(fragment.provenance, provenance);
+        let right_provenance = PlanVar::Internal(InternalVar::new(2));
 
         assert_eq!(
-            fragment.plan,
+            plan,
             RewritePlan::Select {
                 input: Box::new(RewritePlan::CompatibleOptional {
                     left: Box::new(RewritePlan::Extend {
-                        input: Box::new(RewritePlan::Unit),
+                        input: Box::new(RewritePlan::Unit,),
                         expression: PlanExpr::One,
                         variable: left_provenance.clone(),
-                    }),
+                    },),
                     right: Box::new(RewritePlan::Extend {
-                        input: Box::new(RewritePlan::Unit),
+                        input: Box::new(RewritePlan::Unit,),
                         expression: PlanExpr::One,
                         variable: right_provenance.clone(),
-                    }),
+                    },),
                     substitutions: vec![],
                 },),
                 items: vec![SelectItem::Expr {
                     expression: PlanExpr::Difference {
-                        left: Box::new(PlanExpr::Var(left_provenance.clone(),)),
+                        left: Box::new(PlanExpr::Var(left_provenance.clone(),),),
                         right: Box::new(PlanExpr::AggregateSum(Box::new(PlanExpr::Var(
-                            right_provenance
-                        ),)),),
+                            right_provenance,
+                        ),),),),
                     },
                     alias: provenance,
                 }],
@@ -134,6 +132,7 @@ mod tests {
     #[test]
     fn renames_shared_variable_not_strongly_bound_on_left() {
         let x = Variable::new("x").expect("valid variable");
+
         let y = Variable::new("y").expect("valid variable");
 
         let left = CoreQuery::Union(
@@ -144,11 +143,13 @@ mod tests {
         let right = variable_pattern(x, y.clone());
 
         let variables = in_scope(&left);
+
         let mut context = RewriteContext::new();
+        let provenance = context.fresh_var();
 
-        let fragment = rewrite(&left, &right, &variables, &mut context);
+        let plan = rewrite(&left, &right, &variables, &provenance, &mut context);
 
-        let RewritePlan::Select { input, .. } = fragment.plan else {
+        let RewritePlan::Select { input, .. } = plan else {
             panic!("DIFF must produce an outer SELECT");
         };
 
@@ -158,6 +159,7 @@ mod tests {
 
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].from, y);
+
         assert!(matches!(substitutions[0].to, PlanVar::Internal(_)));
     }
 }

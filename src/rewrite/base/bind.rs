@@ -1,5 +1,5 @@
 use crate::model::{CoreQuery, QueryExprId};
-use crate::plan::{PlanVar, RewriteFragment, RewritePlan};
+use crate::plan::{PlanVar, RewritePlan};
 use oxrdf::Variable;
 
 use super::rewrite_with_context;
@@ -13,17 +13,15 @@ pub(super) fn rewrite(
     input: &CoreQuery,
     expression: QueryExprId,
     variable: &Variable,
+    provenance: &PlanVar,
     context: &mut RewriteContext,
-) -> RewriteFragment {
-    let input = rewrite_with_context(input, context);
+) -> RewritePlan {
+    let input = rewrite_with_context(input, provenance, context);
 
-    RewriteFragment {
-        plan: RewritePlan::Bind {
-            input: Box::new(input.plan),
-            expression,
-            variable: PlanVar::User(variable.clone()),
-        },
-        provenance: input.provenance,
+    RewritePlan::Bind {
+        input: Box::new(input),
+        expression,
+        variable: PlanVar::User(variable.clone()),
     }
 }
 
@@ -39,15 +37,14 @@ mod tests {
         let variable = Variable::new("x").expect("valid variable");
 
         let mut context = RewriteContext::new();
+        let provenance = context.fresh_var();
 
-        let fragment = rewrite(&input, expression, &variable, &mut context);
+        let plan = rewrite(&input, expression, &variable, &provenance, &mut context);
 
-        let provenance = PlanVar::Internal(InternalVar::new(0));
-
-        assert_eq!(fragment.provenance, provenance);
+        assert_eq!(provenance, PlanVar::Internal(InternalVar::new(0)));
 
         assert_eq!(
-            fragment.plan,
+            plan,
             RewritePlan::Bind {
                 input: Box::new(RewritePlan::Extend {
                     input: Box::new(RewritePlan::Unit),

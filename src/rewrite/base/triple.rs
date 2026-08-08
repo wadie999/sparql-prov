@@ -1,5 +1,5 @@
 use crate::model::TriplePattern;
-use crate::plan::{RewriteFragment, RewritePlan};
+use crate::plan::{PlanVar, RewritePlan};
 
 use super::aggregate;
 use crate::rewrite::context::RewriteContext;
@@ -9,26 +9,26 @@ use crate::rewrite::variables::pattern_variables;
 ///
 /// Rewrites a triple pattern by reifying its matched statement and
 /// aggregating all provenance sources for each solution mapping.
-pub(super) fn rewrite(pattern: &TriplePattern, context: &mut RewriteContext) -> RewriteFragment {
+pub(super) fn rewrite(
+    pattern: &TriplePattern,
+    provenance: &PlanVar,
+    context: &mut RewriteContext,
+) -> RewritePlan {
     let source = context.fresh_var();
-    let provenance = context.fresh_var();
 
     let reified = RewritePlan::ReifiedTriple {
         pattern: pattern.clone(),
         source: source.clone(),
     };
 
-    RewriteFragment {
-        plan: aggregate::sum_by(reified, &pattern_variables(pattern), &source, &provenance),
-        provenance,
-    }
+    aggregate::sum_by(reified, &pattern_variables(pattern), &source, provenance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ObjectPattern, PredicatePattern, SubjectPattern};
-    use crate::plan::{InternalVar, PlanExpr, PlanVar, SelectItem};
+    use crate::plan::{InternalVar, PlanExpr, SelectItem};
     use oxrdf::Variable;
 
     #[test]
@@ -44,35 +44,33 @@ mod tests {
         };
 
         let mut context = RewriteContext::new();
+        let provenance = context.fresh_var();
 
-        let fragment = rewrite(&pattern, &mut context);
+        let plan = rewrite(&pattern, &provenance, &mut context);
 
-        let source = PlanVar::Internal(InternalVar::new(0));
-        let provenance = PlanVar::Internal(InternalVar::new(1));
+        let source = PlanVar::Internal(InternalVar::new(1));
 
         let subject = PlanVar::User(subject);
         let predicate = PlanVar::User(predicate);
         let object = PlanVar::User(object);
 
-        assert_eq!(fragment.provenance, provenance);
-
         assert_eq!(
-            fragment.plan,
+            plan,
             RewritePlan::Select {
                 input: Box::new(RewritePlan::ReifiedTriple {
                     pattern,
                     source: source.clone(),
-                }),
+                },),
                 items: vec![
                     SelectItem::Var(subject.clone()),
                     SelectItem::Var(predicate.clone()),
                     SelectItem::Var(object.clone()),
                     SelectItem::Expr {
-                        expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(source))),
+                        expression: PlanExpr::AggregateSum(Box::new(PlanExpr::Var(source),),),
                         alias: provenance,
                     },
                 ],
-                group_by: vec![subject, predicate, object],
+                group_by: vec![subject, predicate, object,],
             }
         );
     }
