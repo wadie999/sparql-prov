@@ -2,6 +2,7 @@
 
 pub mod base;
 pub mod normalize;
+pub mod optimized;
 
 mod context;
 mod scope;
