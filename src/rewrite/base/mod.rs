@@ -4,6 +4,7 @@
 
 mod aggregate;
 mod and;
+mod bind;
 mod diff;
 mod empty;
 mod filter;
@@ -55,6 +56,10 @@ pub(super) fn rewrite_with_context(
 
         CoreQuery::Filter { input, condition } => filter::rewrite(input, *condition, context),
 
-        _ => todo!("remaining NPCS base rewriting rules"),
+        CoreQuery::Bind {
+            input,
+            expression,
+            variable,
+        } => bind::rewrite(input, *expression, variable, context),
     }
 }
