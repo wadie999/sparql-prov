@@ -6,6 +6,7 @@ mod aggregate;
 mod and;
 mod empty;
 mod triple;
+mod union;
 
 use crate::model::CoreQuery;
 use crate::plan::RewriteFragment;
@@ -33,6 +34,12 @@ pub(super) fn rewrite_with_context(
             let variables = in_scope(query);
 
             and::rewrite(left, right, &variables, context)
+        }
+
+        CoreQuery::Union(left, right) => {
+            let variables = in_scope(query);
+
+            union::rewrite(left, right, &variables, context)
         }
 
         _ => todo!("remaining NPCS base rewriting rules"),
