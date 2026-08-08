@@ -4,6 +4,7 @@
 
 mod aggregate;
 mod and;
+mod diff;
 mod empty;
 mod triple;
 mod union;
@@ -40,6 +41,12 @@ pub(super) fn rewrite_with_context(
             let variables = in_scope(query);
 
             union::rewrite(left, right, &variables, context)
+        }
+
+        CoreQuery::Diff(left, right) => {
+            let variables = in_scope(query);
+
+            diff::rewrite(left, right, &variables, context)
         }
 
         _ => todo!("remaining NPCS base rewriting rules"),
