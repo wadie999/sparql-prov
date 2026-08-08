@@ -4,4 +4,5 @@
 //! for SPARQL queries.
 
 pub mod model;
+pub mod plan;
 pub mod provenance;
