@@ -9,3 +9,4 @@ repository = "https://github.com/wadie999/sparql-proof"
 readme = "README.md"
 
 [dependencies]
+oxrdf = "0.3.3"
