@@ -46,11 +46,9 @@ impl PlanVariableResolver {
 
         let variable = self.allocate_name(internal);
 
-        self.reserved_names
-            .insert(variable.as_str().to_owned());
+        self.reserved_names.insert(variable.as_str().to_owned());
 
-        self.resolved_internal
-            .insert(internal, variable.clone());
+        self.resolved_internal.insert(internal, variable.clone());
 
         variable
     }
@@ -92,10 +90,7 @@ mod tests {
 
         let mut resolver = PlanVariableResolver::new(std::slice::from_ref(&user));
 
-        assert_eq!(
-            resolver.resolve(&PlanVar::User(user.clone())),
-            user
-        );
+        assert_eq!(resolver.resolve(&PlanVar::User(user.clone())), user);
     }
 
     #[test]
@@ -125,29 +120,24 @@ mod tests {
 
     #[test]
     fn internal_variables_avoid_user_variable_collisions() {
-        let reserved =
-            Variable::new("__sparql_proof_0").expect("valid SPARQL variable");
+        let reserved = Variable::new("__sparql_proof_0").expect("valid SPARQL variable");
 
         let mut resolver = PlanVariableResolver::new(&[reserved]);
 
-        let generated =
-            resolver.resolve(&PlanVar::Internal(InternalVar::new(0)));
+        let generated = resolver.resolve(&PlanVar::Internal(InternalVar::new(0)));
 
         assert_eq!(generated.as_str(), "__sparql_proof_0_1");
     }
 
     #[test]
     fn collision_resolution_skips_all_reserved_candidates() {
-        let first =
-            Variable::new("__sparql_proof_0").expect("valid SPARQL variable");
+        let first = Variable::new("__sparql_proof_0").expect("valid SPARQL variable");
 
-        let second =
-            Variable::new("__sparql_proof_0_1").expect("valid SPARQL variable");
+        let second = Variable::new("__sparql_proof_0_1").expect("valid SPARQL variable");
 
         let mut resolver = PlanVariableResolver::new(&[first, second]);
 
-        let generated =
-            resolver.resolve(&PlanVar::Internal(InternalVar::new(0)));
+        let generated = resolver.resolve(&PlanVar::Internal(InternalVar::new(0)));
 
         assert_eq!(generated.as_str(), "__sparql_proof_0_2");
     }
