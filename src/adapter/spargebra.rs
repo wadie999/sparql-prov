@@ -13,17 +13,22 @@ use spargebra::algebra::GraphPattern;
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern as SpargebraTriplePattern};
 use spargebra::{Query, SparqlParser};
 
-use crate::model::{CoreQuery, ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern};
+use crate::compiler::{ExpressionVariableSubstitution, InputExpressionRenderer};
+use crate::model::{
+    CoreQuery, ObjectPattern, PredicatePattern, QueryExprId, SubjectPattern, TriplePattern,
+};
+
+use super::spargebra_expression::{SpargebraExpressionStore, expression_variables};
 
 /// Result of adapting an input SPARQL query.
 ///
 /// Besides the parser-independent query model, the adapter retains the user
-/// variables appearing in the original query. The compiler uses this set to
-/// avoid collisions with generated internal variables.
+/// variables and preserved input expressions required by later compilation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSparqlQuery {
     query: CoreQuery,
     variables: Vec<Variable>,
+    expressions: SpargebraExpressionStore,
 }
 
 impl ParsedSparqlQuery {
@@ -43,6 +48,16 @@ impl ParsedSparqlQuery {
     }
 }
 
+impl InputExpressionRenderer for ParsedSparqlQuery {
+    fn render(
+        &self,
+        expression: QueryExprId,
+        substitutions: &[ExpressionVariableSubstitution],
+    ) -> Option<String> {
+        self.expressions.render(expression, substitutions)
+    }
+}
+
 /// Error raised while parsing or adapting a SPARQL query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpargebraAdapterError {
@@ -53,8 +68,16 @@ pub enum SpargebraAdapterError {
     UnsupportedQueryForm(&'static str),
 
     /// The parsed algebra contains a graph-pattern operation outside the
-    /// currently supported NPCS adapter fragment.
+    /// currently supported adapter fragment.
     UnsupportedGraphPattern(&'static str),
+
+    /// A preserved SPARQL expression contains a construct that cannot yet be
+    /// safely retained and structurally substituted.
+    UnsupportedExpression(&'static str),
+
+    /// More preserved expressions were encountered than `QueryExprId` can
+    /// represent.
+    ExpressionIdentifierSpaceExhausted,
 }
 
 impl fmt::Display for SpargebraAdapterError {
@@ -71,17 +94,53 @@ impl fmt::Display for SpargebraAdapterError {
             Self::UnsupportedGraphPattern(kind) => {
                 write!(formatter, "unsupported SPARQL graph pattern: {kind}")
             }
+
+            Self::UnsupportedExpression(kind) => {
+                write!(formatter, "unsupported SPARQL expression: {kind}")
+            }
+
+            Self::ExpressionIdentifierSpaceExhausted => {
+                formatter.write_str("input expression identifier space exhausted")
+            }
         }
     }
 }
 
 impl Error for SpargebraAdapterError {}
 
+#[derive(Debug, Default)]
+struct AdapterContext {
+    expressions: SpargebraExpressionStore,
+    variables: Vec<Variable>,
+    seen_variables: HashSet<Variable>,
+}
+
+impl AdapterContext {
+    fn push_variable(&mut self, variable: &Variable) {
+        if self.seen_variables.insert(variable.clone()) {
+            self.variables.push(variable.clone());
+        }
+    }
+
+    fn preserve_expression(
+        &mut self,
+        expression: &spargebra::algebra::Expression,
+    ) -> Result<QueryExprId, SpargebraAdapterError> {
+        for variable in expression_variables(expression)? {
+            self.push_variable(&variable);
+        }
+
+        self.expressions.preserve(expression)
+    }
+}
+
 /// Parses a SPARQL SELECT query into the SPARQLProof core model.
 pub fn parse_sparql(input: &str) -> Result<ParsedSparqlQuery, SpargebraAdapterError> {
     let parsed = SparqlParser::new()
         .parse_query(input)
         .map_err(|error| SpargebraAdapterError::Parse(error.to_string()))?;
+
+    let mut context = AdapterContext::default();
 
     let query = match parsed {
         Query::Select {
@@ -93,7 +152,7 @@ pub fn parse_sparql(input: &str) -> Result<ParsedSparqlQuery, SpargebraAdapterEr
                 ));
             }
 
-            adapt_graph_pattern(&pattern)?
+            adapt_graph_pattern(&pattern, &mut context)?
         }
 
         Query::Construct { .. } => {
@@ -109,29 +168,71 @@ pub fn parse_sparql(input: &str) -> Result<ParsedSparqlQuery, SpargebraAdapterEr
         }
     };
 
-    let variables = collect_query_variables(&query);
-
-    Ok(ParsedSparqlQuery { query, variables })
+    Ok(ParsedSparqlQuery {
+        query,
+        variables: context.variables,
+        expressions: context.expressions,
+    })
 }
 
-fn adapt_graph_pattern(pattern: &GraphPattern) -> Result<CoreQuery, SpargebraAdapterError> {
+fn adapt_graph_pattern(
+    pattern: &GraphPattern,
+    context: &mut AdapterContext,
+) -> Result<CoreQuery, SpargebraAdapterError> {
     match pattern {
-        GraphPattern::Bgp { patterns } => adapt_bgp(patterns),
+        GraphPattern::Bgp { patterns } => adapt_bgp(patterns, context),
 
         GraphPattern::Join { left, right } => Ok(CoreQuery::And(
-            Box::new(adapt_graph_pattern(left)?),
-            Box::new(adapt_graph_pattern(right)?),
+            Box::new(adapt_graph_pattern(left, context)?),
+            Box::new(adapt_graph_pattern(right, context)?),
         )),
 
         GraphPattern::Union { left, right } => Ok(CoreQuery::Union(
-            Box::new(adapt_graph_pattern(left)?),
-            Box::new(adapt_graph_pattern(right)?),
+            Box::new(adapt_graph_pattern(left, context)?),
+            Box::new(adapt_graph_pattern(right, context)?),
         )),
 
-        GraphPattern::Project { inner, variables } => Ok(CoreQuery::Select {
-            variables: variables.clone(),
-            input: Box::new(adapt_graph_pattern(inner)?),
-        }),
+        GraphPattern::Project { inner, variables } => {
+            let input = adapt_graph_pattern(inner, context)?;
+
+            for variable in variables {
+                context.push_variable(variable);
+            }
+
+            Ok(CoreQuery::Select {
+                variables: variables.clone(),
+                input: Box::new(input),
+            })
+        }
+
+        GraphPattern::Filter { expr, inner } => {
+            let input = adapt_graph_pattern(inner, context)?;
+
+            let condition = context.preserve_expression(expr)?;
+
+            Ok(CoreQuery::Filter {
+                input: Box::new(input),
+                condition,
+            })
+        }
+
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
+            let input = adapt_graph_pattern(inner, context)?;
+
+            let expression = context.preserve_expression(expression)?;
+
+            context.push_variable(variable);
+
+            Ok(CoreQuery::Bind {
+                input: Box::new(input),
+                expression,
+                variable: variable.clone(),
+            })
+        }
 
         GraphPattern::Path { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern(
             "property path",
@@ -141,13 +242,7 @@ fn adapt_graph_pattern(pattern: &GraphPattern) -> Result<CoreQuery, SpargebraAda
             Err(SpargebraAdapterError::UnsupportedGraphPattern("OPTIONAL"))
         }
 
-        GraphPattern::Filter { .. } => {
-            Err(SpargebraAdapterError::UnsupportedGraphPattern("FILTER"))
-        }
-
         GraphPattern::Graph { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern("GRAPH")),
-
-        GraphPattern::Extend { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern("BIND")),
 
         GraphPattern::Minus { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern("MINUS")),
 
@@ -181,40 +276,50 @@ fn adapt_graph_pattern(pattern: &GraphPattern) -> Result<CoreQuery, SpargebraAda
     }
 }
 
-fn adapt_bgp(patterns: &[SpargebraTriplePattern]) -> Result<CoreQuery, SpargebraAdapterError> {
+fn adapt_bgp(
+    patterns: &[SpargebraTriplePattern],
+    context: &mut AdapterContext,
+) -> Result<CoreQuery, SpargebraAdapterError> {
     let mut patterns = patterns.iter();
 
     let Some(first) = patterns.next() else {
         return Ok(CoreQuery::Empty);
     };
 
-    let mut query = CoreQuery::Triple(adapt_triple_pattern(first));
+    let mut query = CoreQuery::Triple(adapt_triple_pattern(first, context));
 
     for pattern in patterns {
         query = CoreQuery::And(
             Box::new(query),
-            Box::new(CoreQuery::Triple(adapt_triple_pattern(pattern))),
+            Box::new(CoreQuery::Triple(adapt_triple_pattern(pattern, context))),
         );
     }
 
     Ok(query)
 }
 
-fn adapt_triple_pattern(pattern: &SpargebraTriplePattern) -> TriplePattern {
+fn adapt_triple_pattern(
+    pattern: &SpargebraTriplePattern,
+    context: &mut AdapterContext,
+) -> TriplePattern {
     TriplePattern {
-        subject: adapt_subject(&pattern.subject),
-        predicate: adapt_predicate(&pattern.predicate),
-        object: adapt_object(&pattern.object),
+        subject: adapt_subject(&pattern.subject, context),
+        predicate: adapt_predicate(&pattern.predicate, context),
+        object: adapt_object(&pattern.object, context),
     }
 }
 
-fn adapt_subject(pattern: &TermPattern) -> SubjectPattern {
+fn adapt_subject(pattern: &TermPattern, context: &mut AdapterContext) -> SubjectPattern {
     match pattern {
         TermPattern::NamedNode(node) => SubjectPattern::NamedNode(node.clone()),
 
         TermPattern::BlankNode(node) => SubjectPattern::BlankNode(node.clone()),
 
-        TermPattern::Variable(variable) => SubjectPattern::Variable(variable.clone()),
+        TermPattern::Variable(variable) => {
+            context.push_variable(variable);
+
+            SubjectPattern::Variable(variable.clone())
+        }
 
         TermPattern::Literal(_) => {
             unreachable!("SPARQL parser cannot place a literal in subject position")
@@ -222,15 +327,19 @@ fn adapt_subject(pattern: &TermPattern) -> SubjectPattern {
     }
 }
 
-fn adapt_predicate(pattern: &NamedNodePattern) -> PredicatePattern {
+fn adapt_predicate(pattern: &NamedNodePattern, context: &mut AdapterContext) -> PredicatePattern {
     match pattern {
         NamedNodePattern::NamedNode(node) => PredicatePattern::NamedNode(node.clone()),
 
-        NamedNodePattern::Variable(variable) => PredicatePattern::Variable(variable.clone()),
+        NamedNodePattern::Variable(variable) => {
+            context.push_variable(variable);
+
+            PredicatePattern::Variable(variable.clone())
+        }
     }
 }
 
-fn adapt_object(pattern: &TermPattern) -> ObjectPattern {
+fn adapt_object(pattern: &TermPattern, context: &mut AdapterContext) -> ObjectPattern {
     match pattern {
         TermPattern::NamedNode(node) => ObjectPattern::NamedNode(node.clone()),
 
@@ -238,85 +347,11 @@ fn adapt_object(pattern: &TermPattern) -> ObjectPattern {
 
         TermPattern::Literal(literal) => ObjectPattern::Literal(literal.clone()),
 
-        TermPattern::Variable(variable) => ObjectPattern::Variable(variable.clone()),
-    }
-}
+        TermPattern::Variable(variable) => {
+            context.push_variable(variable);
 
-fn collect_query_variables(query: &CoreQuery) -> Vec<Variable> {
-    let mut variables = Vec::new();
-    let mut seen = HashSet::new();
-
-    collect_core_query_variables(query, &mut variables, &mut seen);
-
-    variables
-}
-
-fn collect_core_query_variables(
-    query: &CoreQuery,
-    variables: &mut Vec<Variable>,
-    seen: &mut HashSet<Variable>,
-) {
-    match query {
-        CoreQuery::Empty => {}
-
-        CoreQuery::Triple(pattern) => {
-            collect_triple_variables(pattern, variables, seen);
+            ObjectPattern::Variable(variable.clone())
         }
-
-        CoreQuery::And(left, right)
-        | CoreQuery::Union(left, right)
-        | CoreQuery::Diff(left, right) => {
-            collect_core_query_variables(left, variables, seen);
-
-            collect_core_query_variables(right, variables, seen);
-        }
-
-        CoreQuery::Select {
-            variables: projected,
-            input,
-        } => {
-            collect_core_query_variables(input, variables, seen);
-
-            for variable in projected {
-                push_variable(variable, variables, seen);
-            }
-        }
-
-        CoreQuery::Filter { input, .. } => {
-            collect_core_query_variables(input, variables, seen);
-        }
-
-        CoreQuery::Bind {
-            input, variable, ..
-        } => {
-            collect_core_query_variables(input, variables, seen);
-
-            push_variable(variable, variables, seen);
-        }
-    }
-}
-
-fn collect_triple_variables(
-    pattern: &TriplePattern,
-    variables: &mut Vec<Variable>,
-    seen: &mut HashSet<Variable>,
-) {
-    if let SubjectPattern::Variable(variable) = &pattern.subject {
-        push_variable(variable, variables, seen);
-    }
-
-    if let PredicatePattern::Variable(variable) = &pattern.predicate {
-        push_variable(variable, variables, seen);
-    }
-
-    if let ObjectPattern::Variable(variable) = &pattern.object {
-        push_variable(variable, variables, seen);
-    }
-}
-
-fn push_variable(variable: &Variable, variables: &mut Vec<Variable>, seen: &mut HashSet<Variable>) {
-    if seen.insert(variable.clone()) {
-        variables.push(variable.clone());
     }
 }
 
@@ -407,6 +442,118 @@ mod tests {
         );
 
         assert!(parsed.variables().is_empty());
+    }
+
+    #[test]
+    fn parses_filter_and_preserves_expression() {
+        let parsed = parse_sparql(
+            "SELECT ?person WHERE {
+                ?person <http://example.com/age> ?age .
+                FILTER(?age >= 18)
+            }",
+        )
+        .expect("FILTER query should parse");
+
+        let CoreQuery::Select { input, .. } = parsed.query() else {
+            panic!("expected SELECT");
+        };
+
+        let CoreQuery::Filter { condition, .. } = input.as_ref() else {
+            panic!("expected FILTER");
+        };
+
+        let rendered = parsed
+            .render(*condition, &[])
+            .expect("preserved expression should render");
+
+        assert!(rendered.contains("?age"));
+        assert!(rendered.contains(">="));
+    }
+
+    #[test]
+    fn parses_bind_and_preserves_expression() {
+        let parsed = parse_sparql(
+            "SELECT ?label WHERE {
+                ?person <http://example.com/name> ?name .
+                BIND(STR(?name) AS ?label)
+            }",
+        )
+        .expect("BIND query should parse");
+
+        let CoreQuery::Select { input, .. } = parsed.query() else {
+            panic!("expected SELECT");
+        };
+
+        let CoreQuery::Bind {
+            expression,
+            variable,
+            ..
+        } = input.as_ref()
+        else {
+            panic!("expected BIND");
+        };
+
+        assert_eq!(variable, &Variable::new("label").expect("valid variable"));
+
+        let rendered = parsed
+            .render(*expression, &[])
+            .expect("preserved expression should render");
+
+        assert!(rendered.contains("STR(?name)"));
+    }
+
+    #[test]
+    fn preserved_expression_can_be_structurally_renamed() {
+        let parsed = parse_sparql(
+            "SELECT ?value WHERE {
+                ?s <http://example.com/p> ?value .
+                FILTER(BOUND(?value) && ?value != 0)
+            }",
+        )
+        .expect("FILTER query should parse");
+
+        let CoreQuery::Select { input, .. } = parsed.query() else {
+            panic!("expected SELECT");
+        };
+
+        let CoreQuery::Filter { condition, .. } = input.as_ref() else {
+            panic!("expected FILTER");
+        };
+
+        let value = Variable::new("value").expect("valid variable");
+
+        let renamed = Variable::new("renamed").expect("valid variable");
+
+        let rendered = parsed
+            .render(
+                *condition,
+                &[ExpressionVariableSubstitution {
+                    from: value,
+                    to: renamed,
+                }],
+            )
+            .expect("preserved expression should render");
+
+        assert!(rendered.contains("BOUND(?renamed)"));
+        assert!(rendered.contains("?renamed"));
+    }
+
+    #[test]
+    fn rejects_exists_expression_explicitly() {
+        let error = parse_sparql(
+            "SELECT ?s WHERE {
+                ?s <http://example.com/p> ?o .
+                FILTER EXISTS {
+                    ?s <http://example.com/q> ?x
+                }
+            }",
+        )
+        .expect_err("EXISTS should be rejected");
+
+        assert_eq!(
+            error,
+            SpargebraAdapterError::UnsupportedExpression("EXISTS")
+        );
     }
 
     #[test]

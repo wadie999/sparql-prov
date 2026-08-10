@@ -5,5 +5,6 @@
 //! particular SPARQL parser.
 
 mod spargebra;
+mod spargebra_expression;
 
 pub use spargebra::{ParsedSparqlQuery, SpargebraAdapterError, parse_sparql};
