@@ -13,9 +13,5 @@ use crate::model::TriplePattern;
 pub trait ReificationScheme {
     /// Compiles a triple pattern together with the variable that receives
     /// its provenance identifier.
-    fn reify(
-        &self,
-        pattern: &TriplePattern,
-        source: &Variable,
-    ) -> String;
+    fn reify(&self, pattern: &TriplePattern, source: &Variable) -> String;
 }

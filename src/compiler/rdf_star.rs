@@ -37,11 +37,7 @@ impl RdfStarReification {
 }
 
 impl ReificationScheme for RdfStarReification {
-    fn reify(
-        &self,
-        pattern: &TriplePattern,
-        source: &Variable,
-    ) -> String {
+    fn reify(&self, pattern: &TriplePattern, source: &Variable) -> String {
         format!(
             "{} {} {} .",
             embedded_triple_pattern(pattern),
@@ -55,34 +51,25 @@ impl ReificationScheme for RdfStarReification {
 mod tests {
     use oxrdf::{NamedNode, Variable};
 
-    use crate::model::{
-        ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern,
-    };
+    use crate::model::{ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern};
 
     use super::*;
 
     #[test]
     fn reifies_a_triple_without_aggregating_its_source() {
         let strategy = RdfStarReification::new(
-            NamedNode::new("http://example.com/wasDerivedFrom")
-                .expect("valid IRI"),
+            NamedNode::new("http://example.com/wasDerivedFrom").expect("valid IRI"),
         );
 
         let pattern = TriplePattern {
-            subject: SubjectPattern::Variable(
-                Variable::new("person").expect("valid variable"),
-            ),
+            subject: SubjectPattern::Variable(Variable::new("person").expect("valid variable")),
             predicate: PredicatePattern::NamedNode(
-                NamedNode::new("http://example.com/likes")
-                    .expect("valid IRI"),
+                NamedNode::new("http://example.com/likes").expect("valid IRI"),
             ),
-            object: ObjectPattern::Variable(
-                Variable::new("food").expect("valid variable"),
-            ),
+            object: ObjectPattern::Variable(Variable::new("food").expect("valid variable")),
         };
 
-        let source =
-            Variable::new("__sparql_proof_0").expect("valid variable");
+        let source = Variable::new("__sparql_proof_0").expect("valid variable");
 
         assert_eq!(
             strategy.reify(&pattern, &source),
@@ -93,9 +80,7 @@ mod tests {
 
     #[test]
     fn exposes_the_configured_provenance_predicate() {
-        let predicate =
-            NamedNode::new("http://example.com/source")
-                .expect("valid IRI");
+        let predicate = NamedNode::new("http://example.com/source").expect("valid IRI");
 
         let strategy = RdfStarReification::new(predicate.clone());
 

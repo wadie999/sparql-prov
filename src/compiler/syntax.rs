@@ -1,8 +1,6 @@
 //! Serialization helpers for query-model terms used by the compiler.
 
-use crate::model::{
-    ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern,
-};
+use crate::model::{ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern};
 
 /// Serializes a triple pattern without a trailing dot.
 pub(super) fn triple_pattern(pattern: &TriplePattern) -> String {
@@ -54,16 +52,11 @@ mod tests {
     #[test]
     fn serializes_basic_triple_pattern() {
         let pattern = TriplePattern {
-            subject: SubjectPattern::Variable(
-                Variable::new("person").expect("valid variable"),
-            ),
+            subject: SubjectPattern::Variable(Variable::new("person").expect("valid variable")),
             predicate: PredicatePattern::NamedNode(
-                NamedNode::new("http://example.com/likes")
-                    .expect("valid IRI"),
+                NamedNode::new("http://example.com/likes").expect("valid IRI"),
             ),
-            object: ObjectPattern::Literal(Literal::new_simple_literal(
-                "pasta",
-            )),
+            object: ObjectPattern::Literal(Literal::new_simple_literal("pasta")),
         };
 
         assert_eq!(
@@ -75,16 +68,11 @@ mod tests {
     #[test]
     fn serializes_embedded_triple_pattern() {
         let pattern = TriplePattern {
-            subject: SubjectPattern::Variable(
-                Variable::new("person").expect("valid variable"),
-            ),
+            subject: SubjectPattern::Variable(Variable::new("person").expect("valid variable")),
             predicate: PredicatePattern::NamedNode(
-                NamedNode::new("http://example.com/likes")
-                    .expect("valid IRI"),
+                NamedNode::new("http://example.com/likes").expect("valid IRI"),
             ),
-            object: ObjectPattern::Variable(
-                Variable::new("food").expect("valid variable"),
-            ),
+            object: ObjectPattern::Variable(Variable::new("food").expect("valid variable")),
         };
 
         assert_eq!(
@@ -96,27 +84,19 @@ mod tests {
     #[test]
     fn serializes_nested_triple_patterns_recursively() {
         let nested = TriplePattern {
-            subject: SubjectPattern::Variable(
-                Variable::new("person").expect("valid variable"),
-            ),
+            subject: SubjectPattern::Variable(Variable::new("person").expect("valid variable")),
             predicate: PredicatePattern::NamedNode(
-                NamedNode::new("http://example.com/likes")
-                    .expect("valid IRI"),
+                NamedNode::new("http://example.com/likes").expect("valid IRI"),
             ),
-            object: ObjectPattern::Variable(
-                Variable::new("food").expect("valid variable"),
-            ),
+            object: ObjectPattern::Variable(Variable::new("food").expect("valid variable")),
         };
 
         let outer = TriplePattern {
             subject: SubjectPattern::Triple(Box::new(nested)),
             predicate: PredicatePattern::NamedNode(
-                NamedNode::new("http://example.com/assertedBy")
-                    .expect("valid IRI"),
+                NamedNode::new("http://example.com/assertedBy").expect("valid IRI"),
             ),
-            object: ObjectPattern::Variable(
-                Variable::new("source").expect("valid variable"),
-            ),
+            object: ObjectPattern::Variable(Variable::new("source").expect("valid variable")),
         };
 
         assert_eq!(
