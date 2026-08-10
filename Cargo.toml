@@ -7,6 +7,28 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/wadie999/sparql-proof"
 readme = "README.md"
 
+[features]
+default = []
+server = [
+    "dep:axum",
+    "dep:serde",
+    "dep:tokio",
+]
+
 [dependencies]
 oxrdf = "0.3.3"
 spargebra = "=0.4.6"
+
+axum = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+tokio = {
+    version = "1",
+    features = ["macros", "rt-multi-thread", "net", "signal"],
+    optional = true
+}
+
+[[bin]]
+name = "sparql-proof-server"
+path = "src/bin/server.rs"
+required-features = ["server"]
