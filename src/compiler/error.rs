@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::model::QueryExprId;
+
 /// Error raised by the SPARQL compiler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -11,6 +13,9 @@ pub enum CompileError {
 
     /// The rewrite plan violates a structural compiler invariant.
     InvalidPlan(&'static str),
+
+    /// A preserved input expression could not be recovered.
+    MissingInputExpression(QueryExprId),
 }
 
 impl fmt::Display for CompileError {
@@ -22,6 +27,14 @@ impl fmt::Display for CompileError {
 
             Self::InvalidPlan(reason) => {
                 write!(formatter, "invalid rewrite plan: {reason}")
+            }
+
+            Self::MissingInputExpression(expression) => {
+                write!(
+                    formatter,
+                    "missing input expression with identifier {}",
+                    expression.index()
+                )
             }
         }
     }

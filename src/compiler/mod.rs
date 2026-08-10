@@ -7,6 +7,7 @@
 
 mod error;
 mod expression;
+mod input_expression;
 mod rdf_star;
 mod reification;
 mod syntax;
@@ -14,13 +15,26 @@ mod variables;
 
 use oxrdf::Variable;
 
-use crate::plan::{RewritePlan, SelectItem};
+use crate::plan::{PlanVar, RewritePlan, SelectItem};
 
 pub use error::CompileError;
+pub use input_expression::{ExpressionVariableSubstitution, InputExpressionRenderer};
 pub use rdf_star::RdfStarReification;
 pub use reification::ReificationScheme;
 
 use variables::PlanVariableResolver;
+
+struct NoInputExpressions;
+
+impl InputExpressionRenderer for NoInputExpressions {
+    fn render(
+        &self,
+        _expression: crate::model::QueryExprId,
+        _substitutions: &[ExpressionVariableSubstitution],
+    ) -> Option<String> {
+        None
+    }
+}
 
 /// Compiles provenance rewrite plans using a selected RDF reification
 /// strategy.
@@ -38,28 +52,46 @@ where
         Self { reification }
     }
 
-    /// Compiles a rewrite plan to SPARQL.
+    /// Compiles a rewrite plan that does not require preserved input
+    /// expressions.
     ///
-    /// `reserved_variables` must contain the variables originating from the
-    /// input query. They are used to guarantee that compiler-generated
-    /// variables cannot collide with user variables.
+    /// Plans containing FILTER or input BIND nodes must instead use
+    /// `compile_with_expressions`.
     pub fn compile(
         &self,
         plan: &RewritePlan,
         reserved_variables: &[Variable],
     ) -> Result<String, CompileError> {
+        self.compile_with_expressions(plan, reserved_variables, &NoInputExpressions)
+    }
+
+    /// Compiles a rewrite plan with access to expressions preserved from the
+    /// input query.
+    pub fn compile_with_expressions<E>(
+        &self,
+        plan: &RewritePlan,
+        reserved_variables: &[Variable],
+        expressions: &E,
+    ) -> Result<String, CompileError>
+    where
+        E: InputExpressionRenderer,
+    {
         let mut variables = PlanVariableResolver::new(reserved_variables);
 
-        let pattern = self.compile_pattern(plan, &mut variables)?;
+        let pattern = self.compile_pattern(plan, &mut variables, expressions)?;
 
         Ok(format!("SELECT * WHERE {{ {pattern} }}"))
     }
 
-    fn compile_pattern(
+    fn compile_pattern<E>(
         &self,
         plan: &RewritePlan,
         variables: &mut PlanVariableResolver,
-    ) -> Result<String, CompileError> {
+        expressions: &E,
+    ) -> Result<String, CompileError>
+    where
+        E: InputExpressionRenderer,
+    {
         match plan {
             RewritePlan::Unit => Ok(String::new()),
 
@@ -69,51 +101,75 @@ where
                 Ok(self.reification.reify(pattern, &source))
             }
 
-            RewritePlan::Join(inputs) => self.compile_join(inputs, variables),
+            RewritePlan::Join(inputs) => self.compile_join(inputs, variables, expressions),
 
-            RewritePlan::Union(inputs) => self.compile_union(inputs, variables),
+            RewritePlan::Union(inputs) => self.compile_union(inputs, variables, expressions),
 
             RewritePlan::Select {
                 input,
                 items,
                 group_by,
-            } => self.compile_select(input, items, group_by, variables),
+            } => self.compile_select(input, items, group_by, variables, expressions),
 
-            RewritePlan::Extend {
+            RewritePlan::Filter { input, condition } => {
+                let input = self.compile_pattern(input, variables, expressions)?;
+
+                let condition = expressions
+                    .render(*condition, &[])
+                    .ok_or(CompileError::MissingInputExpression(*condition))?;
+
+                append_pattern(input, format!("FILTER({condition})"))
+            }
+
+            RewritePlan::Bind {
                 input,
-                expression,
+                expression: input_expression,
                 variable,
             } => {
-                let input = self.compile_pattern(input, variables)?;
+                let input = self.compile_pattern(input, variables, expressions)?;
 
-                let expression = expression::compile(expression, variables);
+                let input_expression = expressions
+                    .render(*input_expression, &[])
+                    .ok_or(CompileError::MissingInputExpression(*input_expression))?;
 
                 let variable = variables.resolve(variable);
 
-                let bind = format!("BIND({expression} AS {variable})");
+                append_pattern(input, format!("BIND({input_expression} AS {variable})"))
+            }
 
-                append_pattern(input, bind)
+            RewritePlan::Extend {
+                input,
+                expression: plan_expression,
+                variable,
+            } => {
+                let input = self.compile_pattern(input, variables, expressions)?;
+
+                let plan_expression = expression::compile(plan_expression, variables);
+
+                let variable = variables.resolve(variable);
+
+                append_pattern(input, format!("BIND({plan_expression} AS {variable})"))
             }
 
             RewritePlan::CompatibleOptional { .. } => {
                 Err(CompileError::UnsupportedPlan("CompatibleOptional"))
             }
-
-            RewritePlan::Filter { .. } => Err(CompileError::UnsupportedPlan("Filter")),
-
-            RewritePlan::Bind { .. } => Err(CompileError::UnsupportedPlan("Bind")),
         }
     }
 
-    fn compile_join(
+    fn compile_join<E>(
         &self,
         inputs: &[RewritePlan],
         variables: &mut PlanVariableResolver,
-    ) -> Result<String, CompileError> {
+        expressions: &E,
+    ) -> Result<String, CompileError>
+    where
+        E: InputExpressionRenderer,
+    {
         let mut compiled = Vec::with_capacity(inputs.len());
 
         for input in inputs {
-            let pattern = self.compile_pattern(input, variables)?;
+            let pattern = self.compile_pattern(input, variables, expressions)?;
 
             if !pattern.is_empty() {
                 compiled.push(pattern);
@@ -123,11 +179,15 @@ where
         Ok(compiled.join(" "))
     }
 
-    fn compile_union(
+    fn compile_union<E>(
         &self,
         inputs: &[RewritePlan],
         variables: &mut PlanVariableResolver,
-    ) -> Result<String, CompileError> {
+        expressions: &E,
+    ) -> Result<String, CompileError>
+    where
+        E: InputExpressionRenderer,
+    {
         if inputs.is_empty() {
             return Err(CompileError::InvalidPlan(
                 "union requires at least one input",
@@ -137,27 +197,32 @@ where
         let mut compiled = Vec::with_capacity(inputs.len());
 
         for input in inputs {
-            let pattern = self.compile_pattern(input, variables)?;
+            let pattern = self.compile_pattern(input, variables, expressions)?;
+
             compiled.push(format!("{{ {pattern} }}"));
         }
 
         Ok(compiled.join(" UNION "))
     }
 
-    fn compile_select(
+    fn compile_select<E>(
         &self,
         input: &RewritePlan,
         items: &[SelectItem],
-        group_by: &[crate::plan::PlanVar],
+        group_by: &[PlanVar],
         variables: &mut PlanVariableResolver,
-    ) -> Result<String, CompileError> {
+        expressions: &E,
+    ) -> Result<String, CompileError>
+    where
+        E: InputExpressionRenderer,
+    {
         if items.is_empty() {
             return Err(CompileError::InvalidPlan(
                 "select requires at least one projected item",
             ));
         }
 
-        let input = self.compile_pattern(input, variables)?;
+        let input = self.compile_pattern(input, variables, expressions)?;
 
         let items = items
             .iter()
@@ -193,11 +258,11 @@ where
                 expression: plan_expression,
                 alias,
             } => {
-                let expression = expression::compile(plan_expression, variables);
+                let plan_expression = expression::compile(plan_expression, variables);
 
                 let alias = variables.resolve(alias);
 
-                format!("({expression} AS {alias})")
+                format!("({plan_expression} AS {alias})")
             }
         }
     }
@@ -215,9 +280,13 @@ fn append_pattern(left: String, right: String) -> Result<String, CompileError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use oxrdf::{NamedNode, Variable};
 
-    use crate::model::{ObjectPattern, PredicatePattern, SubjectPattern, TriplePattern};
+    use crate::model::{
+        ObjectPattern, PredicatePattern, QueryExprId, SubjectPattern, TriplePattern,
+    };
     use crate::plan::{InternalVar, PlanExpr, PlanVar, RewritePlan, SelectItem};
 
     use super::*;
@@ -235,6 +304,34 @@ mod tests {
                 NamedNode::new("http://example.com/likes").expect("valid IRI"),
             ),
             object: ObjectPattern::Variable(Variable::new("food").expect("valid variable")),
+        }
+    }
+
+    #[derive(Default)]
+    struct TestExpressions {
+        expressions: HashMap<QueryExprId, String>,
+    }
+
+    impl TestExpressions {
+        fn with(mut self, id: QueryExprId, expression: &str) -> Self {
+            self.expressions.insert(id, expression.to_owned());
+
+            self
+        }
+    }
+
+    impl InputExpressionRenderer for TestExpressions {
+        fn render(
+            &self,
+            expression: QueryExprId,
+            substitutions: &[ExpressionVariableSubstitution],
+        ) -> Option<String> {
+            assert!(
+                substitutions.is_empty(),
+                "ordinary FILTER/BIND compilation must not rename variables"
+            );
+
+            self.expressions.get(&expression).cloned()
         }
     }
 
@@ -368,9 +465,9 @@ BIND(?__sparql_proof_0 AS ?__sparql_proof_1) }"
             variable: PlanVar::Internal(InternalVar::new(1)),
         };
 
-        let plan = RewritePlan::Join(vec![first, second]);
-
-        let query = compiler().compile(&plan, &[]).expect("join should compile");
+        let query = compiler()
+            .compile(&RewritePlan::Join(vec![first, second]), &[])
+            .expect("join should compile");
 
         assert_eq!(
             query,
@@ -382,10 +479,8 @@ BIND(1 AS ?__sparql_proof_1) }"
 
     #[test]
     fn empty_join_behaves_as_unit_pattern() {
-        let plan = RewritePlan::Join(Vec::new());
-
         let query = compiler()
-            .compile(&plan, &[])
+            .compile(&RewritePlan::Join(Vec::new()), &[])
             .expect("empty join should compile");
 
         assert_eq!(query, "SELECT * WHERE {  }");
@@ -405,10 +500,8 @@ BIND(1 AS ?__sparql_proof_1) }"
             variable: PlanVar::Internal(InternalVar::new(1)),
         };
 
-        let plan = RewritePlan::Union(vec![first, second]);
-
         let query = compiler()
-            .compile(&plan, &[])
+            .compile(&RewritePlan::Union(vec![first, second]), &[])
             .expect("union should compile");
 
         assert_eq!(
@@ -421,10 +514,8 @@ BIND(1 AS ?__sparql_proof_1) }"
 
     #[test]
     fn rejects_empty_union() {
-        let plan = RewritePlan::Union(Vec::new());
-
         let error = compiler()
-            .compile(&plan, &[])
+            .compile(&RewritePlan::Union(Vec::new()), &[])
             .expect_err("empty union must be rejected");
 
         assert_eq!(
@@ -514,8 +605,61 @@ WHERE { \
     }
 
     #[test]
-    fn unsupported_plan_nodes_fail_explicitly() {
-        let condition = crate::model::QueryExprId::new(0);
+    fn compiles_preserved_filter_expression() {
+        let condition = QueryExprId::new(7);
+
+        let expressions =
+            TestExpressions::default().with(condition, "?person != <http://example.com/Alice>");
+
+        let plan = RewritePlan::Filter {
+            input: Box::new(RewritePlan::ReifiedTriple {
+                pattern: triple_pattern(),
+                source: PlanVar::Internal(InternalVar::new(0)),
+            }),
+            condition,
+        };
+
+        let query = compiler()
+            .compile_with_expressions(&plan, &[], &expressions)
+            .expect("filter should compile");
+
+        assert_eq!(
+            query,
+            "SELECT * WHERE { \
+<< ?person <http://example.com/likes> ?food >> \
+<http://example.com/wasDerivedFrom> ?__sparql_proof_0 . \
+FILTER(?person != <http://example.com/Alice>) }"
+        );
+    }
+
+    #[test]
+    fn compiles_preserved_bind_expression() {
+        let expression_id = QueryExprId::new(8);
+
+        let expressions = TestExpressions::default().with(expression_id, "STR(?person)");
+
+        let result = Variable::new("label").expect("valid variable");
+
+        let plan = RewritePlan::Bind {
+            input: Box::new(RewritePlan::Unit),
+            expression: expression_id,
+            variable: PlanVar::User(result.clone()),
+        };
+
+        let query = compiler()
+            .compile_with_expressions(&plan, std::slice::from_ref(&result), &expressions)
+            .expect("bind should compile");
+
+        assert_eq!(
+            query,
+            "SELECT * WHERE { \
+BIND(STR(?person) AS ?label) }"
+        );
+    }
+
+    #[test]
+    fn reports_missing_preserved_expression() {
+        let condition = QueryExprId::new(9);
 
         let plan = RewritePlan::Filter {
             input: Box::new(RewritePlan::Unit),
@@ -524,8 +668,23 @@ WHERE { \
 
         let error = compiler()
             .compile(&plan, &[])
-            .expect_err("filter compilation is not implemented yet");
+            .expect_err("missing expression must fail");
 
-        assert_eq!(error, CompileError::UnsupportedPlan("Filter"));
+        assert_eq!(error, CompileError::MissingInputExpression(condition));
+    }
+
+    #[test]
+    fn compatible_optional_remains_explicitly_unsupported() {
+        let plan = RewritePlan::CompatibleOptional {
+            left: Box::new(RewritePlan::Unit),
+            right: Box::new(RewritePlan::Unit),
+            substitutions: Vec::new(),
+        };
+
+        let error = compiler()
+            .compile(&plan, &[])
+            .expect_err("compatible optional is not implemented yet");
+
+        assert_eq!(error, CompileError::UnsupportedPlan("CompatibleOptional"));
     }
 }
