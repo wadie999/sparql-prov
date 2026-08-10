@@ -17,6 +17,7 @@ use crate::compiler::{ExpressionVariableSubstitution, InputExpressionRenderer};
 use crate::model::{
     CoreQuery, ObjectPattern, PredicatePattern, QueryExprId, SubjectPattern, TriplePattern,
 };
+use crate::rewrite::normalize::normalize_optional;
 
 use super::spargebra_expression::{SpargebraExpressionStore, expression_variables};
 
@@ -234,13 +235,27 @@ fn adapt_graph_pattern(
             })
         }
 
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            if expression.is_some() {
+                return Err(SpargebraAdapterError::UnsupportedGraphPattern(
+                    "conditional OPTIONAL",
+                ));
+            }
+
+            let left = adapt_graph_pattern(left, context)?;
+
+            let right = adapt_graph_pattern(right, context)?;
+
+            Ok(normalize_optional(left, right))
+        }
+
         GraphPattern::Path { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern(
             "property path",
         )),
-
-        GraphPattern::LeftJoin { .. } => {
-            Err(SpargebraAdapterError::UnsupportedGraphPattern("OPTIONAL"))
-        }
 
         GraphPattern::Graph { .. } => Err(SpargebraAdapterError::UnsupportedGraphPattern("GRAPH")),
 
@@ -536,6 +551,86 @@ mod tests {
 
         assert!(rendered.contains("BOUND(?renamed)"));
         assert!(rendered.contains("?renamed"));
+    }
+
+    #[test]
+    fn normalizes_plain_optional_into_core_algebra() {
+        let parsed = parse_sparql(
+            "SELECT ?x ?y WHERE {
+                ?x <http://example.com/p> ?value .
+                OPTIONAL {
+                    ?x <http://example.com/q> ?y .
+                }
+            }",
+        )
+        .expect("plain OPTIONAL should parse");
+
+        let CoreQuery::Select { input, .. } = parsed.query() else {
+            panic!("expected SELECT");
+        };
+
+        let CoreQuery::Union(difference, conjunction) = input.as_ref() else {
+            panic!("OPTIONAL should normalize to UNION");
+        };
+
+        assert!(matches!(difference.as_ref(), CoreQuery::Diff(_, _)));
+
+        assert!(matches!(conjunction.as_ref(), CoreQuery::And(_, _)));
+    }
+
+    #[test]
+    fn optional_normalization_preserves_operand_structure() {
+        let parsed = parse_sparql(
+            "SELECT ?x WHERE {
+                ?x <http://example.com/p> ?left .
+                OPTIONAL {
+                    ?x <http://example.com/q> ?middle .
+                    ?middle <http://example.com/r> ?right .
+                }
+            }",
+        )
+        .expect("OPTIONAL should parse");
+
+        let CoreQuery::Select { input, .. } = parsed.query() else {
+            panic!("expected SELECT");
+        };
+
+        let CoreQuery::Union(difference, conjunction) = input.as_ref() else {
+            panic!("OPTIONAL should normalize to UNION");
+        };
+
+        let CoreQuery::Diff(difference_left, difference_right) = difference.as_ref() else {
+            panic!("expected DIFF branch");
+        };
+
+        let CoreQuery::And(conjunction_left, conjunction_right) = conjunction.as_ref() else {
+            panic!("expected AND branch");
+        };
+
+        assert_eq!(difference_left, conjunction_left);
+
+        assert_eq!(difference_right, conjunction_right);
+
+        assert!(matches!(difference_right.as_ref(), CoreQuery::And(_, _)));
+    }
+
+    #[test]
+    fn rejects_conditional_optional_explicitly() {
+        let error = parse_sparql(
+            "SELECT ?x WHERE {
+                ?x <http://example.com/p> ?value .
+                OPTIONAL {
+                    ?x <http://example.com/q> ?y .
+                    FILTER(?y > 0)
+                }
+            }",
+        )
+        .expect_err("conditional OPTIONAL should be rejected");
+
+        assert_eq!(
+            error,
+            SpargebraAdapterError::UnsupportedGraphPattern("conditional OPTIONAL")
+        );
     }
 
     #[test]
