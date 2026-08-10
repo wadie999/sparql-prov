@@ -2,7 +2,6 @@
 name = "sparql-proof"
 version = "0.1.0"
 edition = "2024"
-
 description = "A Rust library for native SPARQL how-provenance."
 license = "AGPL-3.0-only"
 repository = "https://github.com/wadie999/sparql-proof"
@@ -10,3 +9,4 @@ readme = "README.md"
 
 [dependencies]
 oxrdf = "0.3.3"
+spargebra = "=0.4.6"
