@@ -7,6 +7,7 @@
 
 mod error;
 mod expression;
+mod fragment;
 mod input_expression;
 mod rdf_star;
 mod reification;
@@ -19,6 +20,7 @@ use oxrdf::Variable;
 use crate::plan::{PlanVar, RewritePlan, SelectItem, VariableSubstitution};
 
 pub use error::CompileError;
+pub use fragment::CompiledRewrite;
 pub use input_expression::{ExpressionVariableSubstitution, InputExpressionRenderer};
 pub use rdf_star::RdfStarReification;
 pub use reification::ReificationScheme;
