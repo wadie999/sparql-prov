@@ -7,50 +7,58 @@
 //! performed by the rewritten query. It does not construct runtime
 //! `ProvenanceExpr` values.
 
-use crate::plan::{PlanExpr, PlanVar};
+use crate::plan::{PlanExpr, VariableSubstitution};
 
+use super::substitution::resolve_plan_variable;
 use super::variables::PlanVariableResolver;
 
 /// Compiles a rewrite-time provenance expression to SPARQL.
 ///
-/// Variable identities are resolved through the same resolver used by the
-/// surrounding query compilation so that references remain consistent
+/// Variable identities are resolved through the same environment used by the
+/// surrounding query compilation so that NPCS substitutions remain visible
 /// throughout the generated query.
-pub(super) fn compile(expression: &PlanExpr, variables: &mut PlanVariableResolver) -> String {
+pub(super) fn compile(
+    expression: &PlanExpr,
+    variables: &mut PlanVariableResolver,
+    substitutions: &[VariableSubstitution],
+) -> String {
     match expression {
         PlanExpr::One => "1".to_owned(),
 
-        PlanExpr::Var(variable) => compile_variable(variable, variables),
+        PlanExpr::Var(variable) => {
+            resolve_plan_variable(variable, substitutions, variables).to_string()
+        }
 
         PlanExpr::AggregateSum(input) => {
-            let input = compile(input, variables);
+            let input = compile(input, variables, substitutions);
 
             format!("CONCAT(\"(⊕\", GROUP_CONCAT({input}; SEPARATOR=\"\"), \")\")")
         }
 
-        PlanExpr::Product(factors) => compile_product(factors, variables),
+        PlanExpr::Product(factors) => compile_product(factors, variables, substitutions),
 
         PlanExpr::Difference { left, right } => {
-            let left = compile(left, variables);
-            let right = compile(right, variables);
+            let left = compile(left, variables, substitutions);
+
+            let right = compile(right, variables, substitutions);
 
             format!("CONCAT(\"(⊖\", {left}, {right}, \")\")")
         }
     }
 }
 
-fn compile_variable(variable: &PlanVar, variables: &mut PlanVariableResolver) -> String {
-    variables.resolve(variable).to_string()
-}
-
-fn compile_product(factors: &[PlanExpr], variables: &mut PlanVariableResolver) -> String {
+fn compile_product(
+    factors: &[PlanExpr],
+    variables: &mut PlanVariableResolver,
+    substitutions: &[VariableSubstitution],
+) -> String {
     if factors.is_empty() {
         return "1".to_owned();
     }
 
     let factors = factors
         .iter()
-        .map(|factor| compile(factor, variables))
+        .map(|factor| compile(factor, variables, substitutions))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -61,7 +69,7 @@ fn compile_product(factors: &[PlanExpr], variables: &mut PlanVariableResolver) -
 mod tests {
     use oxrdf::Variable;
 
-    use crate::plan::{InternalVar, PlanExpr, PlanVar};
+    use crate::plan::{InternalVar, PlanExpr, PlanVar, VariableSubstitution};
 
     use super::*;
 
@@ -69,7 +77,7 @@ mod tests {
     fn compiles_multiplicative_identity() {
         let mut variables = PlanVariableResolver::new(&[]);
 
-        assert_eq!(compile(&PlanExpr::One, &mut variables), "1");
+        assert_eq!(compile(&PlanExpr::One, &mut variables, &[]), "1");
     }
 
     #[test]
@@ -80,7 +88,26 @@ mod tests {
 
         let mut variables = PlanVariableResolver::new(std::slice::from_ref(&variable));
 
-        assert_eq!(compile(&expression, &mut variables), "?prov");
+        assert_eq!(compile(&expression, &mut variables, &[]), "?prov");
+    }
+
+    #[test]
+    fn compiles_user_variable_under_active_substitution() {
+        let variable = Variable::new("value").expect("valid variable");
+
+        let expression = PlanExpr::Var(PlanVar::User(variable.clone()));
+
+        let substitution = VariableSubstitution {
+            from: variable.clone(),
+            to: PlanVar::Internal(InternalVar::new(6)),
+        };
+
+        let mut variables = PlanVariableResolver::new(std::slice::from_ref(&variable));
+
+        assert_eq!(
+            compile(&expression, &mut variables, &[substitution],),
+            "?__sparql_proof_6"
+        );
     }
 
     #[test]
@@ -89,7 +116,10 @@ mod tests {
 
         let mut variables = PlanVariableResolver::new(&[]);
 
-        assert_eq!(compile(&expression, &mut variables), "?__sparql_proof_4");
+        assert_eq!(
+            compile(&expression, &mut variables, &[]),
+            "?__sparql_proof_4"
+        );
     }
 
     #[test]
@@ -100,7 +130,10 @@ mod tests {
 
         let mut variables = PlanVariableResolver::new(&[reserved]);
 
-        assert_eq!(compile(&expression, &mut variables), "?__sparql_proof_4_1");
+        assert_eq!(
+            compile(&expression, &mut variables, &[]),
+            "?__sparql_proof_4_1"
+        );
     }
 
     #[test]
@@ -112,7 +145,7 @@ mod tests {
         let mut variables = PlanVariableResolver::new(&[]);
 
         assert_eq!(
-            compile(&expression, &mut variables),
+            compile(&expression, &mut variables, &[]),
             "CONCAT(\"(⊕\", \
 GROUP_CONCAT(?__sparql_proof_1; SEPARATOR=\"\"), \")\")"
         );
@@ -129,7 +162,7 @@ GROUP_CONCAT(?__sparql_proof_1; SEPARATOR=\"\"), \")\")"
         let mut variables = PlanVariableResolver::new(&[]);
 
         assert_eq!(
-            compile(&expression, &mut variables),
+            compile(&expression, &mut variables, &[]),
             "CONCAT(\"(⊗\", \
 ?__sparql_proof_1, \
 ?__sparql_proof_2, \
@@ -143,7 +176,7 @@ GROUP_CONCAT(?__sparql_proof_1; SEPARATOR=\"\"), \")\")"
 
         let mut variables = PlanVariableResolver::new(&[]);
 
-        assert_eq!(compile(&expression, &mut variables), "1");
+        assert_eq!(compile(&expression, &mut variables, &[]), "1");
     }
 
     #[test]
@@ -156,7 +189,7 @@ GROUP_CONCAT(?__sparql_proof_1; SEPARATOR=\"\"), \")\")"
         let mut variables = PlanVariableResolver::new(&[]);
 
         assert_eq!(
-            compile(&expression, &mut variables),
+            compile(&expression, &mut variables, &[]),
             "CONCAT(\"(⊖\", \
 ?__sparql_proof_1, \
 ?__sparql_proof_2, \")\")"
@@ -175,7 +208,7 @@ GROUP_CONCAT(?__sparql_proof_1; SEPARATOR=\"\"), \")\")"
         let mut variables = PlanVariableResolver::new(&[]);
 
         assert_eq!(
-            compile(&expression, &mut variables),
+            compile(&expression, &mut variables, &[]),
             "CONCAT(\"(⊖\", \
 ?__sparql_proof_1, \
 CONCAT(\"(⊕\", \
@@ -194,7 +227,7 @@ GROUP_CONCAT(?__sparql_proof_2; SEPARATOR=\"\"), \")\"), \
         let mut variables = PlanVariableResolver::new(&[]);
 
         assert_eq!(
-            compile(&expression, &mut variables),
+            compile(&expression, &mut variables, &[]),
             "CONCAT(\"(⊕\", \
 GROUP_CONCAT(CONCAT(\"(⊗\", \
 ?__sparql_proof_1, \
