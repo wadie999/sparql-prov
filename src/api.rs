@@ -117,7 +117,15 @@ pub fn rewrite_sparql<R>(
 where
     R: ReificationScheme,
 {
-    let parsed = parse_sparql(query)?;
+    // Keep the active dataset outside the algebra rewrite. Nested SELECTs inherit
+    // it, so provenance cannot accidentally use occurrences from another case.
+    let mut input = spargebra::SparqlParser::new().parse_query(query)
+        .map_err(|error| SpargebraAdapterError::Parse(error.to_string()))?;
+    let dataset = match &mut input {
+        spargebra::Query::Select { dataset, .. } => dataset.take(),
+        _ => None,
+    };
+    let parsed = parse_sparql(&input.to_string())?;
 
     let fragment = match strategy {
         RewriteStrategy::Base => base::rewrite(parsed.query()),
@@ -131,8 +139,22 @@ where
         &parsed,
     )?;
 
+    let sparql = if let Some(dataset) = dataset {
+        let mut clauses = String::new();
+        for graph in dataset.default {
+            clauses.push_str(&format!("FROM {graph}\n"));
+        }
+        if let Some(named) = dataset.named {
+            for graph in named {
+                clauses.push_str(&format!("FROM NAMED {graph}\n"));
+            }
+        }
+        format!("SELECT *\n{clauses}WHERE {{ {{ {} }} }}", compiled.sparql())
+    } else {
+        compiled.sparql().to_owned()
+    };
     Ok(RewrittenQuery {
-        sparql: compiled.sparql().to_owned(),
+        sparql,
         provenance_variable: compiled.provenance_variable().clone(),
         strategy,
     })
@@ -241,5 +263,25 @@ mod tests {
             rewritten.sparql().contains(">="),
             "FILTER comparison must remain available"
         );
+    }
+
+    #[test]
+    fn preserves_default_dataset_clauses() {
+        let rewritten = rewrite_sparql(
+            r#"
+            SELECT ?person
+            FROM <urn:case:source-a>
+            FROM <urn:case:source-b>
+            WHERE {
+                ?person <http://example.com/likes> ?food .
+            }
+            "#,
+            RewriteStrategy::Optimized,
+            reification(),
+        )
+        .expect("dataset-scoped query should rewrite");
+
+        assert!(rewritten.sparql().contains("FROM <urn:case:source-a>"));
+        assert!(rewritten.sparql().contains("FROM <urn:case:source-b>"));
     }
 }
