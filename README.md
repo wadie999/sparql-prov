@@ -1,10 +1,10 @@
-# sparql-proof
+# sparql-prov
 
 A Rust library for native SPARQL how-provenance.
 
 ## HTTP API
 
-Start SPARQLProof:
+Start SPARQLProv:
 
 ```bash
 cargo run --release --features server --bin sparql-proof-server
