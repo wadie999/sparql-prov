@@ -46,3 +46,7 @@ To expose the service on the network:
 SPARQL_PROOF_ADDR=0.0.0.0:3000 \
 cargo run --release --features server --bin sparql-proof-server
 ```
+
+## Built on 
+
+The [NPCS method](https://doi.org/10.1145/3589334.3645557) and the Java implementation in the [NPCS repository](https://github.com/ZubariaForthAcc/NPCS).
